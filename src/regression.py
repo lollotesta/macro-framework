@@ -424,6 +424,7 @@ def plot_residual_diagnostics(residuals: pd.Series, lags: int = 10):
     axes[2].set_title("Residual Autocorrelation")
 
     fig.tight_layout()
+    plt.show()
     return fig, axes
 
 def plot_correlation_heatmap(
@@ -432,11 +433,6 @@ def plot_correlation_heatmap(
 ) -> pd.DataFrame:
     """
     Plot correlation heatmap for input regressors.
-
-    Returns
-    -------
-    pd.DataFrame
-        Correlation matrix.
     """
     if not isinstance(X, pd.DataFrame):
         X = pd.DataFrame(X)
@@ -461,3 +457,45 @@ def plot_correlation_heatmap(
     plt.show()
 
     return corr
+
+def plot_rolling_coefficients(
+    rolling_coefficients: pd.DataFrame,
+    title: str = "Rolling Coefficients"
+) -> pd.DataFrame:
+    """
+    Plot rolling regression coefficients through time.
+
+    Parameters
+    ----------
+    rolling_coefficients : pd.DataFrame
+        DataFrame of rolling coefficients, typically from rolling_regression().
+    title : str
+        Chart title.
+
+    Returns
+    -------
+    pd.DataFrame
+        Cleaned rolling coefficients used for plotting.
+    """
+    if not isinstance(rolling_coefficients, pd.DataFrame):
+        raise ValueError("rolling_coefficients must be a pandas DataFrame")
+
+    coef = rolling_coefficients.dropna(how="all")
+
+    if coef.empty:
+        raise ValueError("rolling_coefficients contains no plottable data")
+
+    plt.figure(figsize=(12, 6))
+    for column in coef.columns:
+        plt.plot(coef.index, coef[column], label=column)
+
+    plt.title(title)
+    plt.xlabel("Date")
+    plt.ylabel("Coefficient Value")
+    plt.axhline(0.0, linestyle="--", linewidth=1)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    return coef
