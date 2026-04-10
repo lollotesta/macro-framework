@@ -8,6 +8,8 @@ from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.stats.stattools import durbin_watson, jarque_bera
 from statsmodels.tsa.stattools import adfuller, grangercausalitytests
+from typing import Optional
+import itertools
 
 
 def run_ols(y, X):
@@ -651,3 +653,139 @@ def plot_driver_attribution(
     plt.show()
 
     return normalized_contributions
+
+def search_model_specifications(
+    y,
+    X,
+    min_features: int = 1,
+    max_features: Optional[int] = None,
+    top_n: Optional[int] = None
+) -> pd.DataFrame:
+    """
+    Exhaustively evaluate full-sample OLS model specifications and rank by adjusted R².
+
+    Parameters
+    ----------
+    y : array-like
+        Dependent variable.
+    X : pd.DataFrame or array-like
+        Candidate regressors.
+    min_features : int, default 1
+        Minimum number of regressors per specification.
+    max_features : int or None, default None
+        Maximum number of regressors per specification. If None, use all columns in X.
+    top_n : int or None, default None
+        If provided, return only the top N ranked specifications.
+
+    Returns
+    -------
+    pd.DataFrame
+        Model-specification summary sorted by adjusted R² (descending), including rank.
+    """
+    y_series = y.rename("y") if isinstance(y, pd.Series) else pd.Series(y, name="y")
+    X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+
+    output_columns = [
+        "rank",
+        "regressors",
+        "n_regressors",
+        "r_squared",
+        "adj_r_squared",
+        "aic",
+        "bic",
+        "max_vif",
+        "avg_vif",
+        "residual_adf_p_value",
+        "residual_is_stationary",
+    ]
+
+    if X_df.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    if isinstance(min_features, bool) or not isinstance(min_features, int) or min_features <= 0:
+        raise ValueError("min_features must be a positive integer")
+
+    n_candidates = X_df.shape[1]
+    upper = n_candidates if max_features is None else max_features
+
+    if isinstance(upper, bool) or not isinstance(upper, int):
+        raise ValueError("max_features must be an integer or None")
+    if upper <= 0:
+        raise ValueError("max_features must be positive")
+    if min_features > upper:
+        raise ValueError("min_features cannot exceed max_features")
+
+    upper = min(upper, n_candidates)
+    if min_features > upper:
+        return pd.DataFrame(columns=output_columns)
+
+    records = []
+
+    for k in range(min_features, upper + 1):
+        for regressors in itertools.combinations(X_df.columns, k):
+            subset = pd.concat([y_series, X_df.loc[:, regressors]], axis=1).dropna()
+
+            if subset.empty or subset.shape[0] <= (k + 1):
+                continue
+
+            y_sub = subset["y"]
+            X_sub = subset.drop(columns="y")
+
+            try:
+                model = run_ols(y_sub, X_sub)
+            except Exception:
+                continue
+
+            max_vif = np.nan
+            avg_vif = np.nan
+            try:
+                vif_df = compute_vif(X_sub)
+                if not vif_df.empty:
+                    max_vif = float(vif_df["vif"].max())
+                    avg_vif = float(vif_df["vif"].mean())
+            except Exception:
+                pass
+
+            residual_adf_p_value = np.nan
+            residual_is_stationary = np.nan
+            try:
+                stationarity = test_stationarity(model.resid)
+                residual_adf_p_value = float(stationarity["p_value"])
+                residual_is_stationary = bool(stationarity["is_stationary"])
+            except Exception:
+                pass
+
+            records.append(
+                {
+                    "regressors": tuple(regressors),
+                    "n_regressors": int(k),
+                    "r_squared": float(model.rsquared),
+                    "adj_r_squared": float(model.rsquared_adj),
+                    "aic": float(model.aic),
+                    "bic": float(model.bic),
+                    "max_vif": max_vif,
+                    "avg_vif": avg_vif,
+                    "residual_adf_p_value": residual_adf_p_value,
+                    "residual_is_stationary": residual_is_stationary,
+                }
+            )
+
+    result = pd.DataFrame(records)
+
+    if result.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    result = result.sort_values(
+        by=["adj_r_squared", "n_regressors"],
+        ascending=[False, True]
+    ).reset_index(drop=True)
+
+    result.insert(0, "rank", np.arange(1, len(result) + 1))
+
+    if top_n is not None:
+        if isinstance(top_n, bool) or not isinstance(top_n, int) or top_n <= 0:
+            raise ValueError("top_n must be a positive integer or None")
+        result = result.head(top_n).reset_index(drop=True)
+        result["rank"] = np.arange(1, len(result) + 1)
+
+    return result
