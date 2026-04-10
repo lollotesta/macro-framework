@@ -499,3 +499,155 @@ def plot_rolling_coefficients(
     plt.show()
 
     return coef
+
+def compute_rolling_driver_attribution(
+    y: pd.Series,
+    X: pd.DataFrame,
+    window: int
+) -> dict:
+    """
+    Compute rolling model quality and marginal driver attribution via OLS.
+
+    For each rolling window, this function fits a full model and reduced models
+    that exclude each regressor one-at-a-time. Marginal contribution is defined
+    as:
+
+        contribution_i = R²_full - R²_without_i
+
+    Notes
+    -----
+    Contributions are marginal and generally not uniquely identifiable when
+    regressors are correlated. Multicollinearity can redistribute explanatory
+    power across variables.
+
+    Marginal contributions may occasionally be near zero or negative due to
+    multicollinearity or estimation noise.
+
+    Parameters
+    ----------
+    y : pd.Series
+        Dependent variable.
+    X : pd.DataFrame
+        Regressors.
+    window : int
+        Positive rolling window length.
+
+    Returns
+    -------
+    dict
+        {
+            "rolling_r2": pd.Series,
+            "raw_contributions": pd.DataFrame,
+            "normalized_contributions": pd.DataFrame,
+        }
+    """
+    if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+        raise ValueError("window must be a positive integer")
+
+    if not isinstance(y, pd.Series):
+        y = pd.Series(y)
+
+    if not isinstance(X, pd.DataFrame):
+        X = pd.DataFrame(X)
+
+    if X.shape[1] == 0:
+        raise ValueError("X must contain at least one regressor")
+
+    df = pd.concat([y.rename("y"), X], axis=1).dropna()
+
+    if window > len(df):
+        raise ValueError("window cannot be larger than the number of valid observations")
+
+    y_aligned = df["y"]
+    X_aligned = df.drop(columns="y")
+    columns = list(X_aligned.columns)
+    index = y_aligned.index
+
+    rolling_r2 = pd.Series(np.nan, index=index, dtype=float)
+    raw_contributions = pd.DataFrame(np.nan, index=index, columns=columns, dtype=float)
+    normalized_contributions = pd.DataFrame(np.nan, index=index, columns=columns, dtype=float)
+
+    for end in range(window - 1, len(df)):
+        window_slice = slice(end - window + 1, end + 1)
+        y_window = y_aligned.iloc[window_slice]
+        X_window = X_aligned.iloc[window_slice]
+
+        full_model = run_ols(y_window, X_window)
+        r2_full = full_model.rsquared
+
+        idx = index[end]
+        rolling_r2.loc[idx] = r2_full
+
+        for variable in columns:
+            if len(columns) == 1:
+                raw_contributions.loc[idx, variable] = r2_full
+            else:
+                reduced_X = X_window.drop(columns=variable)
+                reduced_model = run_ols(y_window, reduced_X)
+                raw_contributions.loc[idx, variable] = r2_full - reduced_model.rsquared
+
+        row_sum = raw_contributions.loc[idx].sum(skipna=True)
+        if np.isclose(row_sum, 0.0):
+            normalized_contributions.loc[idx] = np.nan
+        else:
+            normalized_contributions.loc[idx] = raw_contributions.loc[idx] / row_sum
+
+    return {
+        "rolling_r2": rolling_r2,
+        "raw_contributions": raw_contributions,
+        "normalized_contributions": normalized_contributions,
+    }
+
+
+def plot_rolling_r2(
+    rolling_r2: pd.Series,
+    title: str = "Rolling R2"
+) -> pd.Series:
+    """Plot rolling R² through time and return the plotted series."""
+    series = pd.Series(rolling_r2).dropna()
+
+    if series.empty:
+        raise ValueError("rolling_r2 contains no plottable data")
+
+    plt.figure(figsize=(12, 4))
+    plt.plot(series.index, series.values, label="Rolling R2")
+    plt.axhline(0.0, linestyle="--", linewidth=1)
+    plt.title(title)
+    plt.xlabel("Date")
+    plt.ylabel("R²")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    return rolling_r2
+
+
+def plot_driver_attribution(
+    normalized_contributions: pd.DataFrame,
+    title: str = "Rolling Driver Attribution"
+) -> pd.DataFrame:
+    """
+    Plot normalized rolling driver attribution as a stacked area chart.
+
+    The y-axis represents proportional contribution share (0 to 1).
+    """
+    if not isinstance(normalized_contributions, pd.DataFrame):
+        raise ValueError("normalized_contributions must be a pandas DataFrame")
+
+    df = normalized_contributions.dropna(how="all")
+
+    if df.empty:
+        raise ValueError("normalized_contributions contains no plottable data")
+
+    plt.figure(figsize=(12, 6))
+    plt.stackplot(df.index, *[df[col].values for col in df.columns], labels=df.columns)
+    plt.title(title)
+    plt.xlabel("Date")
+    plt.ylabel("Contribution Share")
+    plt.ylim(0, 1)
+    plt.grid(True, axis="y", alpha=0.3)
+    plt.legend(loc="upper left")
+    plt.tight_layout()
+    plt.show()
+
+    return normalized_contributions
