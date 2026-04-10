@@ -425,3 +425,39 @@ def plot_residual_diagnostics(residuals: pd.Series, lags: int = 10):
 
     fig.tight_layout()
     return fig, axes
+
+def plot_correlation_heatmap(
+    X: pd.DataFrame,
+    title: str = "Feature Correlation Heatmap"
+) -> pd.DataFrame:
+    """
+    Plot correlation heatmap for input regressors.
+
+    Returns
+    -------
+    pd.DataFrame
+        Correlation matrix.
+    """
+    if not isinstance(X, pd.DataFrame):
+        X = pd.DataFrame(X)
+
+    corr = X.corr()
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(corr.values, aspect="auto")
+
+    ax.set_xticks(range(len(corr.columns)))
+    ax.set_yticks(range(len(corr.index)))
+    ax.set_xticklabels(corr.columns, rotation=45, ha="right")
+    ax.set_yticklabels(corr.index)
+
+    for i in range(corr.shape[0]):
+        for j in range(corr.shape[1]):
+            ax.text(j, i, f"{corr.iloc[i, j]:.2f}", ha="center", va="center")
+
+    ax.set_title(title)
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    plt.show()
+
+    return corr
