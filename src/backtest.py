@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from typing import Optional, List
 
 
 def _validate_series(series: pd.Series, name: str) -> pd.Series:
@@ -678,3 +679,338 @@ def plot_yearly_pnl(
 
     plt.tight_layout()
     plt.show()
+
+def build_signal_diagnostics_dataset(
+    backtest_df: pd.DataFrame,
+    zscore: pd.Series,
+) -> pd.DataFrame:
+    """
+    Build a dataset for signal diagnostics by combining backtest output
+    with z-score information.
+
+    Parameters
+    ----------
+    backtest_df : pd.DataFrame
+        Output of backtest_signal().
+    zscore : pd.Series
+        Residual z-score series aligned to the backtest index.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns useful for signal diagnostics.
+    """
+    if not isinstance(backtest_df, pd.DataFrame):
+        raise TypeError("backtest_df must be a pandas DataFrame")
+
+    zscore = _validate_series(zscore, "zscore")
+
+    required_columns = {"signal", "position", "daily_pnl_bp"}
+    missing = required_columns - set(backtest_df.columns)
+    if missing:
+        raise ValueError(f"backtest_df is missing required columns: {sorted(missing)}")
+
+    df = backtest_df.copy()
+    df = df.join(zscore.rename("zscore"), how="left")
+
+    df["abs_zscore"] = df["zscore"].abs()
+
+    df["signal_side"] = np.select(
+        [
+            df["signal"] > 0,
+            df["signal"] < 0,
+        ],
+        [
+            "long",
+            "short",
+        ],
+        default="flat",
+    )
+
+    df["position_side"] = np.select(
+        [
+            df["position"] > 0,
+            df["position"] < 0,
+        ],
+        [
+            "long",
+            "short",
+        ],
+        default="flat",
+    )
+
+    df["signal_type"] = np.select(
+        [
+            df["position"] > 0,
+            df["position"] < 0,
+        ],
+        [
+            "fade_cheapness",
+            "fade_richness",
+        ],
+        default="flat",
+    )
+
+    df["is_active"] = df["position"] != 0
+    df["pnl_positive"] = df["daily_pnl_bp"] > 0
+
+    return df
+
+
+def compute_signal_bucket_summary(
+    diagnostics_df: pd.DataFrame,
+    zscore_col: str = "abs_zscore",
+    pnl_col: str = "daily_pnl_bp",
+    bins: Optional[List[float]] = None,
+    active_only: bool = True,
+) -> pd.DataFrame:
+    """
+    Summarize signal behavior by z-score bucket.
+
+    Parameters
+    ----------
+    diagnostics_df : pd.DataFrame
+        Output of build_signal_diagnostics_dataset().
+    zscore_col : str, default "abs_zscore"
+        Column used for bucketization.
+    pnl_col : str, default "daily_pnl_bp"
+        PnL column to summarize.
+    bins : Optional[List[float]], default None
+        Bucket edges for z-score segmentation.
+    active_only : bool, default True
+        If True, restrict to rows where a position is active.
+
+    Returns
+    -------
+    pd.DataFrame
+        Summary table by z-score bucket.
+    """
+    if not isinstance(diagnostics_df, pd.DataFrame):
+        raise TypeError("diagnostics_df must be a pandas DataFrame")
+
+    required_columns = {zscore_col, pnl_col, "is_active"}
+    missing = required_columns - set(diagnostics_df.columns)
+    if missing:
+        raise ValueError(f"diagnostics_df is missing required columns: {sorted(missing)}")
+
+    if bins is None:
+        bins = [0, 0.5, 1.0, 1.5, 2.0, 3.0, np.inf]
+
+    df = diagnostics_df.copy()
+
+    if active_only:
+        df = df[df["is_active"]].copy()
+
+    df = df[df[zscore_col].notna()].copy()
+    df["zscore_bucket"] = pd.cut(df[zscore_col], bins=bins, include_lowest=True)
+
+    grouped = df.groupby("zscore_bucket", observed=False)
+
+    summary = pd.DataFrame({
+        "count": grouped[pnl_col].count(),
+        "avg_pnl_bp": grouped[pnl_col].mean(),
+        "median_pnl_bp": grouped[pnl_col].median(),
+        "total_pnl_bp": grouped[pnl_col].sum(),
+        "pnl_vol_bp": grouped[pnl_col].std(),
+        "hit_ratio": grouped[pnl_col].apply(lambda x: (x > 0).mean()),
+    })
+
+    return summary
+
+
+def compute_signal_bucket_summary_by_side(
+    diagnostics_df: pd.DataFrame,
+    zscore_col: str = "abs_zscore",
+    pnl_col: str = "daily_pnl_bp",
+    side_col: str = "position_side",
+    bins: Optional[List[float]] = None,
+    active_only: bool = True,
+) -> pd.DataFrame:
+    """
+    Summarize signal behavior by z-score bucket and trade side.
+
+    Parameters
+    ----------
+    diagnostics_df : pd.DataFrame
+        Output of build_signal_diagnostics_dataset().
+    zscore_col : str, default "abs_zscore"
+        Column used for bucketization.
+    pnl_col : str, default "daily_pnl_bp"
+        PnL column to summarize.
+    side_col : str, default "position_side"
+        Column identifying long/short side.
+    bins : Optional[List[float]], default None
+        Bucket edges for z-score segmentation.
+    active_only : bool, default True
+        If True, restrict to rows where a position is active.
+
+    Returns
+    -------
+    pd.DataFrame
+        Multi-index summary table by side and z-score bucket.
+    """
+    if not isinstance(diagnostics_df, pd.DataFrame):
+        raise TypeError("diagnostics_df must be a pandas DataFrame")
+
+    required_columns = {zscore_col, pnl_col, side_col, "is_active"}
+    missing = required_columns - set(diagnostics_df.columns)
+    if missing:
+        raise ValueError(f"diagnostics_df is missing required columns: {sorted(missing)}")
+
+    if bins is None:
+        bins = [0, 0.5, 1.0, 1.5, 2.0, 3.0, np.inf]
+
+    df = diagnostics_df.copy()
+
+    if active_only:
+        df = df[df["is_active"]].copy()
+
+    df = df[df[zscore_col].notna()].copy()
+    df = df[df[side_col].isin(["long", "short"])].copy()
+
+    df["zscore_bucket"] = pd.cut(df[zscore_col], bins=bins, include_lowest=True)
+
+    grouped = df.groupby([side_col, "zscore_bucket"], observed=False)
+
+    summary = pd.DataFrame({
+        "count": grouped[pnl_col].count(),
+        "avg_pnl_bp": grouped[pnl_col].mean(),
+        "median_pnl_bp": grouped[pnl_col].median(),
+        "total_pnl_bp": grouped[pnl_col].sum(),
+        "pnl_vol_bp": grouped[pnl_col].std(),
+        "hit_ratio": grouped[pnl_col].apply(lambda x: (x > 0).mean()),
+    })
+
+    return summary
+
+
+def plot_signal_bucket_summary(
+    bucket_summary: pd.DataFrame,
+    column: str = "avg_pnl_bp",
+    title: str = "Signal Diagnostics by Z-Score Bucket",
+    figsize: tuple = (10, 5),
+) -> None:
+    """
+    Plot a selected signal bucket summary column.
+
+    Parameters
+    ----------
+    bucket_summary : pd.DataFrame
+        Output of compute_signal_bucket_summary().
+    column : str, default "avg_pnl_bp"
+        Column to plot.
+    title : str, default "Signal Diagnostics by Z-Score Bucket"
+        Plot title.
+    figsize : tuple, default (10, 5)
+        Figure size.
+    """
+    if not isinstance(bucket_summary, pd.DataFrame):
+        raise TypeError("bucket_summary must be a pandas DataFrame")
+
+    if column not in bucket_summary.columns:
+        raise ValueError(f"column '{column}' not found in bucket_summary")
+
+    plot_data = bucket_summary[column].copy()
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.bar(plot_data.index.astype(str), plot_data.values)
+    ax.axhline(0, linestyle="--", linewidth=1)
+    ax.set_title(title)
+    ax.set_ylabel(column)
+    ax.set_xlabel("Z-score bucket")
+
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+def optimize_zscore_thresholds(
+    price: pd.Series,
+    zscore: pd.Series,
+    thresholds,
+    bp_multiplier: float = 100,
+    lag: int = 1,
+) -> pd.DataFrame:
+    """
+    Test multiple symmetric z-score thresholds and rank strategy performance.
+
+    Strategy rules per threshold t:
+    - long (+1) when zscore < -t
+    - short (-1) when zscore > t
+    - flat (0) otherwise
+
+    Position is lagged to avoid look-ahead bias, and daily PnL is computed as:
+        daily_pnl = lagged_position * price.diff() * bp_multiplier
+    """
+    price = _validate_series(price, "price")
+    zscore = _validate_series(zscore, "zscore")
+
+    try:
+        bp_multiplier = float(bp_multiplier)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("bp_multiplier must be numeric") from exc
+
+    if not np.isfinite(bp_multiplier):
+        raise ValueError("bp_multiplier must be finite")
+
+    if not isinstance(lag, int):
+        raise TypeError("lag must be an integer")
+    if lag < 1:
+        raise ValueError("lag must be >= 1")
+
+    if thresholds is None:
+        raise ValueError("thresholds must not be None")
+
+    try:
+        threshold_values = sorted(set(float(t) for t in thresholds))
+    except TypeError as exc:
+        raise TypeError("thresholds must be an iterable of numeric values") from exc
+    except ValueError as exc:
+        raise ValueError("thresholds contains non-numeric values") from exc
+
+    if len(threshold_values) == 0:
+        raise ValueError("thresholds must contain at least one value")
+    if any((not np.isfinite(t)) or (t <= 0) for t in threshold_values):
+        raise ValueError("all thresholds must be finite and > 0")
+
+    df = pd.concat(
+        [price.rename("price"), zscore.rename("zscore")],
+        axis=1,
+        join="inner",
+    ).sort_index()
+
+    df = df.dropna(subset=["price", "zscore"])
+
+    if df.empty:
+        raise ValueError("price and zscore have no overlapping non-NaN observations")
+
+    price_change = df["price"].diff()
+    rows = []
+
+    for threshold in threshold_values:
+        signal = pd.Series(0, index=df.index, dtype=int)
+        signal = signal.mask(df["zscore"] < -threshold, 1)
+        signal = signal.mask(df["zscore"] > threshold, -1)
+
+        position = signal.shift(lag).fillna(0).astype(int)
+        daily_pnl = (position * price_change * bp_multiplier).fillna(0.0)
+
+        pnl_on_active_days = daily_pnl[daily_pnl != 0]
+        hit_ratio = np.nan if pnl_on_active_days.empty else float((pnl_on_active_days > 0).mean())
+
+        pnl_std = daily_pnl.std(ddof=1)
+        sharpe = np.nan if (pd.isna(pnl_std) or pnl_std == 0) else float(np.sqrt(252) * daily_pnl.mean() / pnl_std)
+
+        rows.append(
+            {
+                "threshold": threshold,
+                "total_pnl_bp": float(daily_pnl.sum()),
+                "sharpe": sharpe,
+                "hit_ratio": hit_ratio,
+                "trade_days": int((position != 0).sum()),
+            }
+        )
+
+    result = pd.DataFrame(rows)
+    result = result.sort_values(["total_pnl_bp", "sharpe"], ascending=[False, False]).reset_index(drop=True)
+
+    return result

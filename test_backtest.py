@@ -92,3 +92,26 @@ print("All basic checks passed.")
 plot_backtest(bt, title="Execution View")
 plot_pnl_and_risk(bt, sharpe_window=60, title="Risk Diagnostics")
 plot_yearly_pnl(bt, title="Yearly Strategy PnL")
+
+signal_diag = build_signal_diagnostics_dataset(bt, zscore)
+
+bucket_summary = compute_signal_bucket_summary(
+    signal_diag,
+    bins=[0, 0.5, 1.0, 1.5, 2.0, 3.0, np.inf],
+    active_only=True,
+)
+
+bucket_summary_by_side = compute_signal_bucket_summary_by_side(
+    signal_diag,
+    bins=[0, 0.5, 1.0, 1.5, 2.0, 3.0, np.inf],
+    active_only=True,
+)
+
+print(bucket_summary)
+print(bucket_summary_by_side)
+
+plot_signal_bucket_summary(
+    bucket_summary,
+    column="avg_pnl_bp",
+    title="Average Daily PnL by Absolute Z-Score Bucket",
+)
