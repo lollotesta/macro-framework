@@ -3,11 +3,20 @@ import numpy as np
 import pandas as pd
 
 
-def _validate_series(series, name):
-    """Validate that input is a pandas Series."""
+def _validate_series(series: pd.Series, name: str) -> pd.Series:
+    """
+    Validate that an input is a non-empty pandas Series.
+    """
+    if series is None:
+        raise ValueError(f"{name} must not be None")
+
     if not isinstance(series, pd.Series):
         raise TypeError(f"{name} must be a pandas Series")
 
+    if series.empty:
+        raise ValueError(f"{name} must not be empty")
+
+    return series
 
 def _safe_sharpe(daily_pnl_bp, annualization_factor=252):
     """Compute annualized Sharpe ratio from daily PnL in bp."""
@@ -458,4 +467,214 @@ def plot_backtest(backtest_df, title="Backtest"):
     axes[1].legend(loc="best")
 
     plt.tight_layout()
+    plt.show()
     return fig, axes
+
+def compute_drawdown_series(cumulative_pnl_bp: pd.Series) -> pd.Series:
+    """
+    Compute drawdown series from cumulative PnL in basis points.
+
+    Parameters
+    ----------
+    cumulative_pnl_bp : pd.Series
+        Cumulative PnL series in basis points.
+
+    Returns
+    -------
+    pd.Series
+        Drawdown series in basis points.
+    """
+    cumulative_pnl_bp = _validate_series(cumulative_pnl_bp, "cumulative_pnl_bp")
+
+    running_max = cumulative_pnl_bp.cummax()
+    drawdown = cumulative_pnl_bp - running_max
+    drawdown.name = "drawdown_bp"
+
+    return drawdown
+
+
+def compute_rolling_sharpe(
+    daily_pnl_bp: pd.Series,
+    window: int = 60,
+    annualization_factor: int = 252,
+) -> pd.Series:
+    """
+    Compute rolling Sharpe ratio from daily PnL in basis points.
+
+    Parameters
+    ----------
+    daily_pnl_bp : pd.Series
+        Daily PnL series in basis points.
+    window : int, default 60
+        Rolling window length.
+    annualization_factor : int, default 252
+        Annualization factor.
+
+    Returns
+    -------
+    pd.Series
+        Rolling Sharpe ratio series.
+    """
+    daily_pnl_bp = _validate_series(daily_pnl_bp, "daily_pnl_bp")
+
+    if window <= 1:
+        raise ValueError("window must be greater than 1")
+    if annualization_factor <= 0:
+        raise ValueError("annualization_factor must be positive")
+
+    rolling_mean = daily_pnl_bp.rolling(window=window, min_periods=window).mean()
+    rolling_std = daily_pnl_bp.rolling(window=window, min_periods=window).std()
+
+    rolling_sharpe = rolling_mean / rolling_std
+    rolling_sharpe = rolling_sharpe * np.sqrt(annualization_factor)
+    rolling_sharpe = rolling_sharpe.where(rolling_std > 0)
+    rolling_sharpe.name = f"rolling_sharpe_{window}d"
+
+    return rolling_sharpe
+
+
+def build_backtest_diagnostics(
+    backtest_df: pd.DataFrame,
+    sharpe_window: int = 60,
+    annualization_factor: int = 252,
+) -> pd.DataFrame:
+    """
+    Add diagnostic time series to a backtest DataFrame.
+
+    Parameters
+    ----------
+    backtest_df : pd.DataFrame
+        Output of backtest_signal().
+    sharpe_window : int, default 60
+        Rolling Sharpe window length.
+    annualization_factor : int, default 252
+        Annualization factor for rolling Sharpe.
+
+    Returns
+    -------
+    pd.DataFrame
+        Backtest DataFrame with diagnostic columns added.
+    """
+    required_columns = {"daily_pnl_bp", "cumulative_pnl_bp"}
+    missing = required_columns - set(backtest_df.columns)
+    if missing:
+        raise ValueError(f"backtest_df is missing required columns: {sorted(missing)}")
+
+    df = backtest_df.copy()
+
+    df["drawdown_bp"] = compute_drawdown_series(df["cumulative_pnl_bp"])
+    df["rolling_sharpe"] = compute_rolling_sharpe(
+        df["daily_pnl_bp"],
+        window=sharpe_window,
+        annualization_factor=annualization_factor,
+    )
+
+    return df
+
+
+def compute_yearly_pnl_series(backtest_df: pd.DataFrame) -> pd.Series:
+    """
+    Compute yearly PnL in basis points from daily PnL.
+
+    Parameters
+    ----------
+    backtest_df : pd.DataFrame
+        Output of backtest_signal().
+
+    Returns
+    -------
+    pd.Series
+        Yearly PnL series in basis points indexed by calendar year.
+    """
+    if "daily_pnl_bp" not in backtest_df.columns:
+        raise ValueError("backtest_df must contain 'daily_pnl_bp'")
+
+    if not isinstance(backtest_df.index, pd.DatetimeIndex):
+        raise ValueError("backtest_df index must be a DatetimeIndex")
+
+    yearly_pnl = backtest_df["daily_pnl_bp"].groupby(backtest_df.index.year).sum()
+    yearly_pnl.name = "yearly_pnl_bp"
+
+    return yearly_pnl
+
+
+def plot_pnl_and_risk(
+    backtest_df: pd.DataFrame,
+    sharpe_window: int = 60,
+    annualization_factor: int = 252,
+    title: str = "Backtest Analytics",
+    figsize: tuple = (12, 10),
+) -> None:
+    """
+    Plot cumulative PnL, drawdown, and rolling Sharpe.
+
+    Parameters
+    ----------
+    backtest_df : pd.DataFrame
+        Output of backtest_signal().
+    sharpe_window : int, default 60
+        Rolling Sharpe window length.
+    annualization_factor : int, default 252
+        Annualization factor for rolling Sharpe.
+    title : str, default "Backtest Analytics"
+        Plot title.
+    figsize : tuple, default (12, 10)
+        Figure size.
+    """
+    diagnostics_df = build_backtest_diagnostics(
+        backtest_df,
+        sharpe_window=sharpe_window,
+        annualization_factor=annualization_factor,
+    )
+
+    fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
+
+    axes[0].plot(diagnostics_df.index, diagnostics_df["cumulative_pnl_bp"], label="Cumulative PnL")
+    axes[0].axhline(0, linestyle="--", linewidth=1)
+    axes[0].set_ylabel("Cumulative PnL (bp)")
+    axes[0].set_title(title)
+    axes[0].legend()
+
+    axes[1].plot(diagnostics_df.index, diagnostics_df["drawdown_bp"], label="Drawdown")
+    axes[1].axhline(0, linestyle="--", linewidth=1)
+    axes[1].set_ylabel("Drawdown (bp)")
+    axes[1].legend()
+
+    axes[2].plot(diagnostics_df.index, diagnostics_df["rolling_sharpe"], label="Rolling Sharpe")
+    axes[2].axhline(0, linestyle="--", linewidth=1)
+    axes[2].set_ylabel(f"Rolling Sharpe ({sharpe_window}d)")
+    axes[2].set_xlabel("Date")
+    axes[2].legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_yearly_pnl(
+    backtest_df: pd.DataFrame,
+    title: str = "Yearly PnL",
+    figsize: tuple = (10, 5),
+) -> None:
+    """
+    Plot yearly PnL in basis points.
+
+    Parameters
+    ----------
+    backtest_df : pd.DataFrame
+        Output of backtest_signal().
+    title : str, default "Yearly PnL"
+        Plot title.
+    figsize : tuple, default (10, 5)
+        Figure size.
+    """
+    yearly_pnl = compute_yearly_pnl_series(backtest_df)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.bar(yearly_pnl.index.astype(str), yearly_pnl.values)
+    ax.axhline(0, linestyle="--", linewidth=1)
+    ax.set_title(title)
+    ax.set_ylabel("PnL (bp)")
+    ax.set_xlabel("Year")
+
+    plt.tight_layout()
+    plt.show()
