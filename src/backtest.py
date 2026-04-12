@@ -931,11 +931,16 @@ def optimize_zscore_thresholds(
     lag: int = 1,
 ) -> pd.DataFrame:
     """
-    Test multiple symmetric z-score thresholds and rank strategy performance.
+    Test multiple symmetric absolute z-score thresholds and rank strategy performance.
+
+    Signal convention
+    -----------------
+    - Positive z-score = cheapness  -> long (+1)
+    - Negative z-score = richness   -> short (-1)
 
     Strategy rules per threshold t:
-    - long (+1) when zscore < -t
-    - short (-1) when zscore > t
+    - long (+1) when zscore >  t
+    - short (-1) when zscore < -t
     - flat (0) otherwise
 
     Position is lagged to avoid look-ahead bias, and daily PnL is computed as:
@@ -988,8 +993,8 @@ def optimize_zscore_thresholds(
 
     for threshold in threshold_values:
         signal = pd.Series(0, index=df.index, dtype=int)
-        signal = signal.mask(df["zscore"] < -threshold, 1)
-        signal = signal.mask(df["zscore"] > threshold, -1)
+        signal = signal.mask(df["zscore"] > threshold, 1)
+        signal = signal.mask(df["zscore"] < -threshold, -1)
 
         position = signal.shift(lag).fillna(0).astype(int)
         daily_pnl = (position * price_change * bp_multiplier).fillna(0.0)
